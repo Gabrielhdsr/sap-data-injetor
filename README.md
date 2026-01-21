@@ -1,48 +1,51 @@
 #🚀 SAP Data Injetor (XML Spreadsheet 2003)
-
-Este projeto automatiza a extração de dados do SQL Server e a injeção inteligente em templates XML do SAP (S/4HANA). O script foi desenvolvido para a Facchini, garantindo que grandes volumes de dados sejam processados sem corromper a estrutura exigida pelo SAP.
+Este projeto automatiza a extração de dados do SQL Server e a injeção em templates XML do SAP (S/4HANA). Desenvolvido para a Facchini, o script garante integridade referencial, baixo consumo de memória e segue rigorosamente a formatação exigida pelo SAP Migration Cockpit.
 
 📋 Pré-requisitos
-Certifique-se de ter o Python instalado e execute o comando abaixo para instalar as bibliotecas necessárias:
+Certifique-se de ter o Python instalado e execute o comando abaixo no terminal:
 
 pip install pandas lxml sqlalchemy pyodbc
 
-Nota: É obrigatório ter o ODBC Driver 18 for SQL Server instalado no sistema para a comunicação com o banco de dados.
+⚠️ Importante: É obrigatório ter o ODBC Driver 18 for SQL Server instalado no Windows para a comunicação com o banco de dados.
 
 ⚙️ Configuração (db_config.json)
-Antes de rodar, edite o arquivo db_config.json na raiz do projeto:
+Edite o arquivo db_config.json na raiz do projeto com as credenciais do banco:
 
-{ "server": "NOME_DO_SERVIDOR", "database": "NOME_DO_BANCO", "username": "USUARIO", "password": "SENHA" }
+{ "server": "SEU_SERVIDOR", "database": "SEU_BANCO", "username": "USUARIO", "password": "SENHA" }
 
-🛠️ Como Executar
-Salve o template XML original do SAP na pasta /layouts.
+🛠️ Ferramentas Disponíveis
+1. Inspecionar Tabelas (Check de Segurança)
+Antes de processar milhares de registros, use este script para validar se os nomes das tabelas no banco seguem o novo padrão e se a chave primária será detectada corretamente.
 
-No terminal, execute o script passando o nome do arquivo: python main.py "CAR.SUP.002 - Fornecedor Criação.xml"
+python tabelas.py "NOME_DO_ARQUIVO.xml"
 
-Resultado: O script criará uma subpasta em /saida com o nome do prefixo (ex: CAR_SUP_002) contendo os arquivos fatiados.
+2. Gerar XMLs (Execução Principal)
+Processa os dados em lotes (chunks) e gera os arquivos finais na pasta de saída.
 
-🧠 Lógica de Aprovação de Abas
-O script utiliza uma Busca Híbrida para garantir integridade total:
+python main.py "NOME_DO_ARQUIVO.xml"
 
-Identificação por Prefixo: Extrai o prefixo do nome do arquivo (ex: CAR.SUP.002 vira CAR_SUP_002).
+🧠 Lógica do "Sniper"
+O script foi reescrito para ser totalmente autônomo, eliminando configurações manuais a cada novo layout:
 
-Match de Nome (Fuzzy > 60%): Compara o nome da aba do XML com o sufixo das tabelas no banco (ignora acentos e espaços).
+Vinculação Direta (Aba -> Tabela): O script normaliza o nome da aba do Excel e busca a tabela exata no banco. Regra: Remove acentos, transforma "Nº" em "N" e troca espaços/caracteres especiais por "_". Exemplo: Aba "Nºs identificação fiscal" vira a tabela "PREFIXO_NS_IDENTIFICACAO_FISCAL".
 
-Validação de DNA (Match 100%): O script lê as colunas técnicas na Linha 5 do XML e verifica se TODAS elas existem na tabela do SQL. Se faltar uma única coluna, a aba é ignorada.
+Auto-Detecção de Chave Primária: O script não precisa mais de uma lista prévia (LIFNR, KUNNR, etc). Ele identifica a aba Mestra (ex: "Dados gerais"), lê a 1ª Coluna dessa tabela no SQL e a define automaticamente como a chave âncora para todo o projeto.
 
-📦 Fatiamento de Arquivos (Chunking)
-Para respeitar o limite de 90MB por arquivo no SAP:
+Carga Sob Demanda: Diferente de versões anteriores, o script não carrega o banco inteiro na memória. Ele baixa apenas a lista de IDs e faz consultas fracionadas (SELECT WHERE ID IN ...), permitindo processar volumes massivos de dados sem lentidão ou crash.
 
-Tamanho do Lote: 1.500 registros por arquivo.
+📦 Fatiamento de Arquivos
+Para respeitar os limites de tamanho do SAP e garantir a integridade:
 
-Comportamento: Se uma aba tiver 5.000 registros, serão gerados 4 arquivos. Os últimos arquivos de uma sequência podem ser menores, pois contêm apenas o saldo remanescente dos dados.
+Lote Padrão: 500 Chaves (Fornecedores/Clientes) por arquivo.
+
+Integridade Total: Todos os dados de um mesmo ID (Endereços, Bancos, Contatos) são mantidos no mesmo arquivo XML, evitando quebras de referência durante a importação no SAP.
 
 📝 Auditoria e Logs
-Toda execução gera um relatório na pasta /logs:
+O projeto preza por um terminal limpo e um log detalhado:
 
-Sucesso: Lista abas preenchidas e total de registros.
+Terminal: Mostra apenas o status de sucesso e o progresso da geração.
 
-Reprovação: Se uma aba for pulada, o log detalha o motivo (ex: DNA incompleto. Faltam: ['LIFNR']).
+Pasta /logs: Gera um .txt completo com cada tentativa de vinculação, erros de tabelas inexistentes, chave detectada e tempo total de execução.
 
-Estrutura do Projeto
-├── main.py # Script principal ├── db_config.json # Configurações de banco ├── layouts/ # Templates (Input) ├── saida/ # XMLs gerados (Output) └── logs/ # Histórico de auditoria
+📂 Estrutura do Projeto
+├── main.py # Script principal de processamento ├── tabelas.py # Script de inspeção e validação ├── db_config.json # Configurações de acesso ao banco ├── layouts/ # Local dos templates XML originais ├── saida/ # Onde os arquivos fatiados serão criados └── logs/ # Histórico detalhado de execuções
