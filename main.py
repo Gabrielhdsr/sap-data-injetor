@@ -1,16 +1,19 @@
 import os, sys, json, math, unicodedata, re, datetime, time
 from lxml import etree
 import pandas as pd
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine
 from urllib.parse import quote_plus
 
 # ==========================================
 # CONFIGURAÇÕES
 # ==========================================
-TAMANHO_LOTE_CHAVES = 500  
+TAMANHO_LOTE_CHAVES = 2500 
 
 # Namespaces
 NS = {"ss": "urn:schemas-microsoft-com:office:spreadsheet"}
+# Namespace adicional do Excel (necessário para achar as opções de proteção)
+NS_EXCEL = "urn:schemas-microsoft-com:office:excel" 
+
 def _q(tag): return f"{{{NS['ss']}}}{tag}"
 ABAS_IGNORADAS = {"Lista de campos", "Field List", "Introdução", "Introduction"}
 
@@ -18,11 +21,6 @@ ABAS_IGNORADAS = {"Lista de campos", "Field List", "Introdução", "Introduction
 # UTILITÁRIOS
 # ==========================================
 def log_msg(lista_logs, msg, console=True):
-    """
-    Registra mensagem.
-    Se console=True (padrão), mostra na tela e salva na memória.
-    Se console=False, APENAS salva na memória (log oculto).
-    """
     if console:
         print(msg)
     lista_logs.append(msg)
@@ -83,21 +81,96 @@ def obter_header_tecnico(ws):
         header.append(val)
     return [h for h in header if h] if header else None
 
+def desproteger_aba(ws):
+    """
+    Remove as tags que protegem a planilha dentro de WorksheetOptions.
+    """
+    # Procura a tag <x:WorksheetOptions>
+    options = ws.find(f".//{{{NS_EXCEL}}}WorksheetOptions")
+    
+    if options is not None:
+        # Tags que causam o bloqueio da aba
+        tags_bloqueio = [
+            f"{{{NS_EXCEL}}}ProtectObjects",
+            f"{{{NS_EXCEL}}}ProtectScenarios",
+            f"{{{NS_EXCEL}}}Protected",
+            f"{{{NS_EXCEL}}}ProtectWindows"
+        ]
+        
+        # Itera sobre os filhos e remove se for tag de proteção
+        # Usamos list(options) para criar uma cópia e poder remover enquanto iteramos
+        for child in list(options):
+            if child.tag in tags_bloqueio:
+                options.remove(child)
+
+def obter_tipos_coluna(ws):
+    """
+    Localiza a tabela na aba e varre a 6ª linha (índice 5)
+    para capturar as definições técnicas de tipo do SAP.
+    """
+    table = ws.find(".//ss:Table", namespaces=NS)
+    rows = table.findall("ss:Row", namespaces=NS)
+    
+    if len(rows) < 6:
+        return []
+
+    tipos = []
+    # Varremos as células da linha 6
+    for c in rows[5].findall("ss:Cell", namespaces=NS):
+        data = c.find("ss:Data", namespaces=NS)
+        # Se a célula existir, pegamos o texto (ex: ENU;13;3), senão, string vazia
+        val = data.text.strip().upper() if data is not None and data.text else ""
+        tipos.append(val)
+    return tipos
+
+def to_number_for_xml(value):
+    if value is None or str(value).strip() == "" or str(value).lower() == "nan":
+        return None
+    
+    # Remove pontos de milhar e troca a vírgula decimal por ponto
+    s = str(value).strip().replace(".", "").replace(",", ".")
+    
+    try:
+        n = float(s)
+        # Se for inteiro (ex: 10.0), vira "10". Se for decimal, mantém as casas.
+        if n.is_integer():
+            return str(int(n))
+        else:
+            return ("%.10f" % n).rstrip("0").rstrip(".")
+    except:
+        return None
+    
 def preencher_aba_xml(ws, df, header_xml):
     table = ws.find(".//ss:Table", namespaces=NS)
     rows = table.findall("ss:Row", namespaces=NS)
     for r in range(len(rows) - 1, 7, -1): table.remove(rows[r])
 
+    tipos = obter_tipos_coluna(ws) # Pegamos a lista de tipos da linha 6
+
     for _, row in df.iterrows():
         row_node = etree.SubElement(table, _q("Row"))
         for idx, col_name in enumerate(header_xml):
-            if not col_name: continue
             val = row[col_name] if col_name in df.columns else ""
-            cell = etree.SubElement(row_node, _q("Cell"), Index=str(idx + 1))
-            etree.SubElement(cell, _q("Data"), {f"{{{NS['ss']}}}Type": "String"}).text = xml_safe(val)
-    
-    table.set(_q("ExpandedRowCount"), str(8 + len(df)))
+            
+            # Identificamos o tipo para esta coluna específica
+            tipo_sap = tipos[idx] if idx < len(tipos) else ""
+            is_num = "NUMERO" in tipo_sap or tipo_sap.startswith("ENU;")
 
+            cell = etree.SubElement(row_node, _q("Cell"), Index=str(idx + 1))
+            
+            if is_num:
+                num_limpo = to_number_for_xml(val)
+                if num_limpo:
+                    # AQUI É O PULO DO GATO: Type="Number"
+                    etree.SubElement(cell, _q("Data"), {f"{{{NS['ss']}}}Type": "Number"}).text = num_limpo
+                else:
+                    etree.SubElement(cell, _q("Data"), {f"{{{NS['ss']}}}Type": "String"}).text = ""
+            else:
+                # Texto normal
+                etree.SubElement(cell, _q("Data"), {f"{{{NS['ss']}}}Type": "String"}).text = xml_safe(val)
+    
+    table.set(_q("ExpandedRowCount"), str(len(table.findall("ss:Row", namespaces=NS))))
+    
 # ==========================================
 # EXECUÇÃO PRINCIPAL
 # ==========================================
@@ -158,7 +231,7 @@ def processar_layout(nome_input):
         log_msg(log, f"CHAVE DEFINIDA: {CHAVE_DETECTADA}")
 
         log_msg(log, "Contando registros...")
-        df_ids = pd.read_sql(f"SELECT DISTINCT {CHAVE_DETECTADA} FROM dbo.[{tabela_mestre}]", engine)
+        df_ids = pd.read_sql(f"SELECT DISTINCT TOP(1) {CHAVE_DETECTADA} FROM dbo.[{tabela_mestre}] WHERE {CHAVE_DETECTADA} IN ('10001884')", engine)
         ids_unicos = df_ids[CHAVE_DETECTADA].dropna().unique().tolist()
         try: ids_unicos.sort(key=int)
         except: ids_unicos.sort()
@@ -185,10 +258,12 @@ def processar_layout(nome_input):
             tabela = meta["tabela"]
             try:
                 query = f"SELECT * FROM dbo.[{tabela}] WHERE {CHAVE_DETECTADA} IN ('{ids_sql}')"
-                df = pd.read_sql(query, engine).astype(str).replace({'nan': '', 'None': ''})
+                df = pd.read_sql(query, engine)
+                df = df.where(pd.notnull(df), None)
             except:
                 query = f"SELECT * FROM dbo.[{tabela}]"
-                df = pd.read_sql(query, engine).astype(str).replace({'nan': '', 'None': ''})
+                df = pd.read_sql(query, engine)
+                df = df.where(pd.notnull(df), None)
 
             df.columns = [c.upper() for c in df.columns]
             if CHAVE_DETECTADA in df.columns: df = df.sort_values(by=CHAVE_DETECTADA)
@@ -200,6 +275,9 @@ def processar_layout(nome_input):
                     break
             
             if ws_node is not None:
+                # --- AQUI ESTÁ A MÁGICA ---
+                # Remove a proteção antes de preencher
+                desproteger_aba(ws_node) 
                 preencher_aba_xml(ws_node, df, meta["header"])
 
         out_name = f"{prefixo}_Parte_{i+1:02d}.xml"
